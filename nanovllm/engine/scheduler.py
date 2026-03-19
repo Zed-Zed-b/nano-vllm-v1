@@ -21,54 +21,11 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
-    def schedule(self) -> tuple[list[Sequence], bool]:
-        # prefill
-        scheduled_seqs = []
-        num_seqs = 0
-        num_batched_tokens = 0
-        while self.waiting and num_seqs < self.max_num_seqs:
-            seq = self.waiting[0]
-            if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
-                break
-            num_seqs += 1
-            self.block_manager.allocate(seq)
-            num_batched_tokens += len(seq) - seq.num_cached_tokens
-            seq.status = SequenceStatus.RUNNING
-            self.waiting.popleft()
-            self.running.append(seq)
-            scheduled_seqs.append(seq)
-        if scheduled_seqs:
-            return scheduled_seqs, True
-
-        # decode
-        while self.running and num_seqs < self.max_num_seqs:
-            seq = self.running.popleft()
-            while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
-                else:
-                    self.preempt(seq)
-                    break
-            else:
-                num_seqs += 1
-                self.block_manager.may_append(seq)
-                scheduled_seqs.append(seq)
-        assert scheduled_seqs
-        self.running.extendleft(reversed(scheduled_seqs))
-        return scheduled_seqs, False
-
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
-
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
-        for seq, token_id in zip(seqs, token_ids):
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
-                seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
-                self.running.remove(seq)
+        
             
     ########## nano vllm V1 add ##########
     def schedule_with_chunked_prefill(self) -> tuple[list[Sequence], list[Sequence], dict[int, int]]:
@@ -188,7 +145,7 @@ class Scheduler:
         scheduled_new_seqs: list[Sequence],
         scheduled_running_seqs: list[Sequence],
         num_scheduled_tokens: dict[int, int],
-        sampled_token_ids: list[int]
+        sampled_token_ids: list[int | None]
     ):
         all_seqs = scheduled_new_seqs + scheduled_running_seqs
         for i, seq in enumerate(all_seqs):
@@ -196,13 +153,13 @@ class Scheduler:
             num_new_token = num_scheduled_tokens[seq_id]
             seq.num_computed_tokens += num_new_token # 添加已经计算的 token 数
             
-            generated_token_ids = sampled_token_ids[i]
-            if not generated_token_ids:
+            generated_token_id = sampled_token_ids[i]
+            if not generated_token_id:
                 continue
             
             # 需要添加新的 token
-            seq.append_token(generated_token_ids)
-            if (not seq.ignore_eos and generated_token_ids == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            seq.append_token(generated_token_id)
+            if (not seq.ignore_eos and generated_token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)

@@ -26,7 +26,7 @@ class ModelRunner:
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
@@ -136,8 +136,8 @@ class ModelRunner:
             seqlen = len(seq)
             input_ids.extend(seq[seq.num_cached_tokens:])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
+            seqlen_q = seqlen - seq.num_cached_tokens   # q 的长度
+            seqlen_k = seqlen  # k 的长度
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
@@ -170,7 +170,7 @@ class ModelRunner:
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -249,3 +249,95 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+
+
+    ########## nano-vllm V1 add ##########
+    def prepare_chunked_prefill(self, all_seqs: list[Sequence], 
+                                num_scheduled_tokens: dict[int, int],
+                                ):
+        input_ids = []
+        positions = []
+        cu_seqlens_q = [0]
+        cu_seqlens_k = [0]
+        max_seqlen_q = 0
+        max_seqlen_k = 0
+        slot_mapping = []
+        
+        # all_seqs = new_seqs + running_seqs
+        
+        for seq in all_seqs:
+            seq_id = seq.seq_id
+            
+            # 对于此 seq，此次 forward 计划的 token 数量
+            num_new_token = num_scheduled_tokens[seq_id]
+            
+            # 1. 基础信息提取 (Query 和 Key 的长度定义)
+            # q_len 是本次计算的长度，k_len 是包含历史在内的总长度
+            curr_computed = seq.num_computed_tokens
+            q_len = num_new_token
+            k_len = curr_computed + q_len
+            
+            input_ids.extend(seq[curr_computed : curr_computed + num_new_token])
+            positions.extend(list(range(curr_computed, curr_computed + num_new_token)))
+            
+            cu_seqlens_q.append(cu_seqlens_q[-1] + q_len)
+            cu_seqlens_k.append(cu_seqlens_k[-1] + k_len)
+            max_seqlen_q = max(q_len, max_seqlen_q)
+            max_seqlen_k = max(k_len, max_seqlen_k)
+            if not seq.block_table: # warm_up, 非 warm_up 至少有一个被分配的 block
+                continue
+            
+            # 2. 核心逻辑：Slot Mapping (物理显存位置映射)
+            token_to_assign = q_len
+            curr_ptr = curr_computed
+            while token_to_assign > 0:
+                block_pos_idx = curr_ptr // self.block_size
+                block_offset = curr_ptr % self.block_size
+                
+                # 获取当前使用的物理 block id
+                physical_block_id = seq.block_table[block_pos_idx]
+                
+                # 计算当前 block id 的剩余空间和实际使用的空间
+                space_in_block = self.block_size - block_offset
+                used_space_in_block = min(space_in_block, token_to_assign)
+                
+                # 生成物理 Slot 地址范围
+                begin_slot = physical_block_id * self.block_size + block_offset
+                end_slot = begin_slot + used_space_in_block
+                slot_mapping.extend(list(range(begin_slot, end_slot)))
+                
+                # 更新指针
+                curr_ptr += used_space_in_block
+                token_to_assign -= used_space_in_block
+                       
+        block_tables_tensor = self.prepare_block_tables(all_seqs)
+        
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        set_context(is_prefill = True, 
+                    cu_seqlens_q = cu_seqlens_q, 
+                    cu_seqlens_k = cu_seqlens_k, 
+                    max_seqlen_q = max_seqlen_q, 
+                    max_seqlen_k = max_seqlen_k, 
+                    slot_mapping = slot_mapping, 
+                    block_tables = block_tables_tensor,
+                   )
+        return input_ids, positions 
+    
+    def run_chunked_prefill(self, new_seqs: list[Sequence], 
+                            running_seqs: list[Sequence],
+                            num_scheduled_tokens: dict[int, int],
+                            ) -> list[int]:
+        all_seqs = new_seqs + running_seqs
+        input_ids, positions = self.prepare_chunked_prefill(all_seqs,
+                                                            num_scheduled_tokens)
+        
+        temperatures = self.prepare_sample(all_seqs) if self.rank == 0 else None
+        logits = self.run_model(input_ids, positions, is_prefill=True)
+        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        reset_context()
+        return token_ids
+        

@@ -103,13 +103,13 @@ class QKVParallelLinear(ColumnParallelLinear):
         total_num_kv_heads: int | None = None,
         bias: bool = False,
     ):
-        tp_size = dist.get_world_size()
+        tp_size = dist.get_world_size() 
         total_num_kv_heads = total_num_kv_heads or total_num_heads
         self.head_size = head_size
         self.num_heads = divide(total_num_heads, tp_size)
         self.num_kv_heads = divide(total_num_kv_heads, tp_size)
         output_size = (total_num_heads + 2 * total_num_kv_heads) * self.head_size
-        super().__init__(hidden_size, output_size, bias)
+        super().__init__(hidden_size, output_size, bias) # 每个 device 上存储的参数形状为 (qkv_dim, hidden_size)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
         param_data = param.data

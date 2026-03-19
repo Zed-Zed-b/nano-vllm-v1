@@ -27,6 +27,9 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        
+        # nano-vllm V1 add
+        self.num_computed_tokens = 0
 
     def __len__(self):
         return self.num_tokens
@@ -64,7 +67,7 @@ class Sequence:
 
     def block(self, i):
         assert 0 <= i < self.num_blocks
-        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
+        return self.token_ids[i * self.block_size: (i+1)*self.block_size]
 
     def append_token(self, token_id: int):
         self.token_ids.append(token_id)

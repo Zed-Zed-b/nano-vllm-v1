@@ -1,32 +1,29 @@
 import os
 from nanovllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    # model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    # exit()
+    path = os.path.expanduser("/home/featurize/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca")
+    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1, kvcache_block_size=256)
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
     prompts = [
-        "introduce yourself",
-        "list all prime numbers within 100",
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
-    prompts = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for prompt in prompts
-    ]
+
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):
-        print("\n")
-        print(f"Prompt: {prompt!r}")
-        print(f"Completion: {output['text']!r}")
+        print(f"Prompt:    {prompt!r}")
+        print(f"Output:    {output['text']!r}")
+        print("-" * 60)
 
 
 if __name__ == "__main__":

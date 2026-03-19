@@ -20,7 +20,7 @@ def load_model(model: nn.Module, path: str):
                         param_name = weight_name.replace(k, v)
                         param = model.get_parameter(param_name)
                         weight_loader = getattr(param, "weight_loader")
-                        weight_loader(param, f.get_tensor(weight_name), shard_id)
+                        weight_loader(param, f.get_tensor(weight_name), shard_id) # shard_id 与算子融合操作有关，确定了哪些权重会被合并为一个 “大权重” 以融合算子
                         break
                 else:
                     param = model.get_parameter(weight_name)

@@ -17,7 +17,7 @@ class VocabParallelEmbedding(nn.Module):
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
         assert num_embeddings % self.tp_size == 0
-        self.num_embeddings = num_embeddings
+        self.num_embeddings = num_embeddings # vocab_size
         self.num_embeddings_per_partition = self.num_embeddings // self.tp_size
         self.vocab_start_idx = self.num_embeddings_per_partition * self.tp_rank
         self.vocab_end_idx = self.vocab_start_idx + self.num_embeddings_per_partition

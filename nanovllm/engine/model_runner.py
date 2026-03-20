@@ -267,6 +267,10 @@ class ModelRunner:
         if not warmup:
             block_tables_tensor = self.prepare_block_tables(all_seqs)
         
+        if max_seqlen_q == 1:
+            assert len(input_ids) == block_tables_tensor.size(0), \
+            f"不相等，输入 token 数量：{len(input_ids)}, block tables 长度: {block_tables_tensor.size(0)}, 被调度的 seq 数量：{len(all_seqs)}"
+            
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -286,7 +290,7 @@ class ModelRunner:
                     max_seqlen_k = max_seqlen_k, 
                     slot_mapping = slot_mapping, 
                     block_tables = block_tables_tensor,
-                    context_lens=context_lens
+                    context_lens = context_lens
                    )
         return input_ids, positions 
     
@@ -294,7 +298,7 @@ class ModelRunner:
                             running_seqs: list[Sequence],
                             num_scheduled_tokens: dict[int, int],
                             ) -> list[int]:
-        all_seqs = new_seqs + running_seqs
+        all_seqs = running_seqs + new_seqs 
         input_ids, positions = self.prepare_chunked_prefill(all_seqs,
                                                             num_scheduled_tokens)
         

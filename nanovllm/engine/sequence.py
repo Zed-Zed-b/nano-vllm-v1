@@ -31,6 +31,18 @@ class Sequence:
         # nano-vllm V1 add
         self.num_computed_tokens = 0
 
+        # Profiling (TTFT): record request arrival time and first completion token time.
+        # These fields are only used for profiling and should not affect scheduling.
+        self._arrival_time: float | None = None
+        self._first_completion_time: float | None = None
+        self._ttft: float | None = None
+
+        # TPOT (Time Per OutputToken): store deltas between consecutive completion tokens.
+        # By definition, TPOT excludes the first completion token, so we only append deltas
+        # once we have a previous completion timestamp.
+        self._last_completion_time: float | None = None
+        self._tpot_deltas: list[float] = []
+
     def __len__(self):
         return self.num_tokens
 
@@ -75,12 +87,26 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
-                self.token_ids if self.num_completion_tokens == 0 else self.last_token)
+        return (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.block_table,
+            self._arrival_time,
+            self._first_completion_time,
+            self._ttft,
+            self._last_completion_time,
+            self._tpot_deltas,
+            self.token_ids if self.num_completion_tokens == 0 else self.last_token,
+        )
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[0:4]
+        self._arrival_time, self._first_completion_time, self._ttft = state[4:7]
+        self._last_completion_time = state[7]
+        self._tpot_deltas = state[8]
+        token_or_last = state[9]
         if self.num_completion_tokens == 0:
-            self.token_ids = state[-1]
+            self.token_ids = token_or_last
         else:
-            self.last_token = state[-1]
+            self.last_token = token_or_last

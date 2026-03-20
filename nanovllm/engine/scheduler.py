@@ -1,4 +1,5 @@
 from collections import deque
+from time import perf_counter
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
@@ -82,7 +83,7 @@ class Scheduler:
         if len(preempt_seqs) == 0: # 没有发生抢占再处理 waitting 队列
             while self.waiting and token_budget > 0:
                 seq = self.waiting[0]  # 直接取第一个，暂不使用任何挑选策略
-                max_new_token = len(seq) - seq.num_computed_tokens
+                # max_new_token = len(seq) - seq.num_computed_tokens
                 
                 if seq.num_computed_tokens == 0:
                     # 计算已经被 prefix cache 的 block，这一操作没有增加 block 的 ref_count，也没有将
@@ -147,18 +148,33 @@ class Scheduler:
         num_scheduled_tokens: dict[int, int],
         sampled_token_ids: list[int | None]
     ):
-        all_seqs = scheduled_new_seqs + scheduled_running_seqs
+        all_seqs = scheduled_running_seqs + scheduled_new_seqs 
         for i, seq in enumerate(all_seqs):
             seq_id = seq.seq_id
             num_new_token = num_scheduled_tokens[seq_id]
             seq.num_computed_tokens += num_new_token # 添加已经计算的 token 数
             
             generated_token_id = sampled_token_ids[i]
-            if not generated_token_id:
+            if generated_token_id is None:
                 continue
             
             # 需要添加新的 token
             seq.append_token(generated_token_id)
+
+            now = perf_counter()
+
+            # TTFT 埋点：第一次产生 completion token 时记录时间戳
+            # 由于 filter_token_ids() 会在 prefill 未结束时把 token_id 置为 None，
+            # 因此这里记录的对应“首个 completion token”的生成时刻。
+            if seq._ttft is None and seq._arrival_time is not None:
+                seq._first_completion_time = now
+                seq._ttft = now - seq._arrival_time
+
+            # TPOT 埋点：记录相邻 completion token 之间的间隔（不含首个 token）
+            if seq._last_completion_time is not None:
+                seq._tpot_deltas.append(now - seq._last_completion_time)
+            seq._last_completion_time = now
+
             if (not seq.ignore_eos and generated_token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)

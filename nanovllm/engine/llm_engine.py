@@ -1,5 +1,6 @@
 import atexit
 from dataclasses import fields
+import math
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -32,6 +33,8 @@ class LLMEngine:
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
         Sequence.block_size = config.kvcache_block_size
+        # For profiling metrics (e.g. TTFT).
+        self._all_seqs: list[Sequence] = []
         atexit.register(self.exit)
 
     def exit(self):
@@ -44,6 +47,9 @@ class LLMEngine:
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
+        # TTFT 起点：请求进入系统的时间
+        seq._arrival_time = perf_counter()
+        self._all_seqs.append(seq)
         self.scheduler.add(seq)
 
     def is_finished(self):
@@ -57,6 +63,7 @@ class LLMEngine:
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[str]:
+        self._all_seqs = []
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):
@@ -83,6 +90,57 @@ class LLMEngine:
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         if use_tqdm:
             pbar.close()
+
+        # TTFT profiling summary (printed at the end).
+        # TTFT is measured per request: from add_request() time to first generated completion token.
+        ttfts = [seq._ttft for seq in self._all_seqs if seq._ttft is not None]
+        if ttfts:
+            ttfts_sorted = sorted(ttfts)
+            n = len(ttfts_sorted)
+            def pct_nearest_rank(p: float) -> float:
+                # nearest-rank percentile
+                idx = int(math.ceil(p * n)) - 1
+                idx = max(0, min(idx, n - 1))
+                return ttfts_sorted[idx]
+            ttft_ms = [x * 1000.0 for x in ttfts]
+            mean_ms = sum(ttft_ms) / n
+            stats = {
+                "TTFT_ms_count": n,
+                "TTFT_ms_mean": mean_ms,
+                "TTFT_ms_p50": pct_nearest_rank(0.50) * 1000.0,
+                "TTFT_ms_p95": pct_nearest_rank(0.95) * 1000.0,
+                "TTFT_ms_p99": pct_nearest_rank(0.99) * 1000.0,
+            }
+            print(stats)
+        else:
+            print({"TTFT_ms_count": 0, "TTFT_ms_note": "No TTFT values recorded"})
+
+        # TPOT profiling summary (printed at the end).
+        # TPOT is measured per request token-to-token interval (excluding the first token).
+        tpot_deltas = []
+        for seq in self._all_seqs:
+            tpot_deltas.extend(seq._tpot_deltas)
+        if tpot_deltas:
+            tpot_ms_sorted = sorted(x * 1000.0 for x in tpot_deltas)
+            n = len(tpot_ms_sorted)
+
+            def pct_nearest_rank_ms(p: float) -> float:
+                idx = int(math.ceil(p * n)) - 1
+                idx = max(0, min(idx, n - 1))
+                return tpot_ms_sorted[idx]
+
+            tpot_mean_ms = sum(tpot_ms_sorted) / n
+            stats = {
+                "TPOT_ms_count": n,
+                "TPOT_ms_mean": tpot_mean_ms,
+                "TPOT_ms_p50": pct_nearest_rank_ms(0.50),
+                "TPOT_ms_p95": pct_nearest_rank_ms(0.95),
+                "TPOT_ms_p99": pct_nearest_rank_ms(0.99),
+            }
+            print(stats)
+        else:
+            print({"TPOT_ms_count": 0, "TPOT_ms_note": "No TPOT values recorded"})
+
         return outputs
     
     def filter_token_ids(self, new_seqs: list[Sequence], 
@@ -92,7 +150,7 @@ class LLMEngine:
         """
         For requests that have not completed prefill, set the new token generated to None.
         """
-        all_seqs = new_seqs + running_seqs
+        all_seqs = running_seqs + new_seqs 
         for i, seq in enumerate(all_seqs):
             seq_id = seq.seq_id
             num_new_token = num_scheduled_tokens[seq_id]
@@ -124,6 +182,6 @@ class LLMEngine:
                                           num_scheduled_tokens, 
                                           token_ids)
         
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in scheduled_new_seqs + scheduled_running_seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in scheduled_running_seqs + scheduled_new_seqs if seq.is_finished]
         num_tokens = sum(num_scheduled_tokens.values())
         return outputs, num_tokens
